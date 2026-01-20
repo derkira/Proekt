@@ -1,0 +1,163 @@
+services:
+  # Основная база данных приложения
+  postgres:
+    image: postgres:15-alpine
+    container_name: goszakupki-postgres
+    environment:
+      POSTGRES_USER: zakupki
+      POSTGRES_PASSWORD: zakupki123
+      POSTGRES_DB: goszakupki_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - goszakupki
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zakupki"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Кеширование в памяти
+  redis:
+    image: redis:7-alpine
+    container_name: goszakupki-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - goszakupki
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Координация сервисов
+  zookeeper:
+    image: zookeeper:3.9
+    container_name: goszakupki-zookeeper
+    environment:
+      ZOO_CFG_EXTRA: "tickTime=2000"
+    ports:
+      - "2181:2181"
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+    networks:
+      - goszakupki
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "echo", "ruok | nc localhost 2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Message broker для потоков
+  kafka:
+    image: confluentinc/cp-kafka:6.2.0
+    container_name: goszakupki-kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_COMPRESSION_TYPE: snappy
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - goszakupki
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ETL оркестрация
+  nifi:
+    image: apache/nifi:1.17.0
+    container_name: goszakupki-nifi
+    environment:
+      NIFI_WEB_HTTP_PORT: 8090
+      NIFI_JVM_HEAP_MAX: 1G
+    ports:
+      - "8090:8090"
+    volumes:
+      - nifi_state:/opt/nifi/state
+      - nifi_conf:/opt/nifi/conf
+    networks:
+      - goszakupki
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/nifi"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  # HDFS NameNode - главный узел
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: goszakupki-namenode
+    environment:
+      CLUSTER_NAME: goszakupki
+      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+    volumes:
+      - namenode:/hadoop/dfs/name
+    networks:
+      - goszakupki
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9870"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # HDFS DataNode - хранилище данных
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: goszakupki-datanode
+    environment:
+      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+    ports:
+      - "9864:9864"
+    volumes:
+      - datanode:/hadoop/dfs/data
+    depends_on:
+      namenode:
+        condition: service_healthy
+    networks:
+      - goszakupki
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9864"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  goszakupki:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  zookeeper_data:
+  kafka_data:
+  nifi_state:
+  nifi_conf:
+  namenode:
+  datanode:
